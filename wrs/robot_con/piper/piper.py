@@ -176,7 +176,7 @@ class PiperArmController:
         time.sleep(0.1)
         self._has_gripper = has_gripper
         # Automatically enable the arm if requested
-        if auto_enable:
+        if auto_enable and not self.is_enabled:
             self.enable()
 
     # ------------------------------------------------------------------
@@ -276,12 +276,12 @@ class PiperArmController:
 
         Notes
         -----
-        The underlying Piper SDK implements Move J as a non‑blocking
+        The underlying Piper SDK implements MoveJ as a non‑blocking
         command; it begins motion to the specified joint angles and
         returns immediately.  Setting ``block=True`` causes this
         wrapper to poll the arm status and joint feedback until the
         target has been reached.  The polling frequency is fixed at
-        approximately 100 Hz.
+        approximately 100Hz.
         """
         # Convert input to NumPy array for validation and conversion
         angles = np.asarray(list(joint_angles), dtype=float)
@@ -301,8 +301,10 @@ class PiperArmController:
             move_spd_rate_ctrl=int(speed),
             is_mit_mode=0x00,
         )
+        time.sleep(.01)
         # Send the joint angles
         self._interface.JointCtrl(*joint_units)
+        time.sleep(.01)
         # If blocking, wait until the target is reached
         if block:
             # Convert tolerance to degrees for comparison
@@ -683,44 +685,42 @@ class PiperArmController:
 
 if __name__ == "__main__":
     import time
-    for can_name in ['can1', 'can0']:
-        # can_name = "can0"  # Change this to your CAN interface name if needed
-        # if platform.system() == "Windows":
-        #     can_name = "0"
-        print(f"{can_name} is running", )
-        print("Creating PiperArmController...")
-        arm = PiperArmController(can_name=can_name, has_gripper=True)
+    can_name = "can0"  # Change this to your CAN interface name if needed
+    if platform.system() == "Windows":
+        can_name = "0"
+    print("Creating PiperArmController...")
+    arm = PiperArmController(can_name=can_name, has_gripper=True)
 
-        print("Current joint angles (deg):")
-        print(np.degrees(arm.get_joint_values()))
+    print("Current joint angles (deg):")
+    print(np.degrees(arm.get_joint_values()))
 
-        print("Current end-effector pose:")
-        pos, rot = arm.get_pose()
-        print("Position (m):", pos)
-        print("Rotation matrix:\n", rot)
+    print("Current end-effector pose:")
+    pos, rot = arm.get_pose()
+    print("Position (m):", pos)
+    print("Rotation matrix:\n", rot)
 
-        print("Current raw pose (m, rad):", arm.get_pose_raw()[:3],
-              np.degrees(arm.get_pose_raw()[3:]))
+    print("Current raw pose (m, rad):", arm.get_pose_raw()[:3],
+          np.degrees(arm.get_pose_raw()[3:]))
 
-        print("Is enabled:", arm.is_enabled)
+    print("Is enabled:", arm.is_enabled)
 
-        print("Go zero joints...")
+    print("Go zero joints...")
+    arm.move_j(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        speed=10,
+        block=True
+    )
+    print("I have already run")
+    time.sleep(4)
+    arm.open_gripper()
+    time.sleep(1)
+    arm.close_gripper()
+    for i in range(100):
         arm.move_j(
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            speed=10,
-            block=True
+            [0.0, 0.0, 0.0, 0.0, 0.0, i * np.pi / 200],
+            block=False
         )
-        print("I have already run")
-        arm.open_gripper()
-        time.sleep(1)
-        arm.close_gripper()
-        # for i in range(100):
-        #     arm.move_j(
-        #         [0.0, 0.0, 0.0, 0.0, 0.0, i * np.pi / 200],
-        #         block=False
-        #     )
-        #     time.sleep(0.01)
-        print("Finished")
+        time.sleep(0.01)
     # if arm.is_enabled:
     #     print("Disabling...")
     #     arm.disable()
