@@ -177,6 +177,7 @@ class PiperArmController:
         self._has_gripper = has_gripper
         # Automatically enable the arm if requested
         if auto_enable and not self.is_enabled:
+            self._interface.MotionCtrl_1(0x00, 0x00, 0x00)
             self.enable()
 
     # ------------------------------------------------------------------
@@ -223,6 +224,7 @@ class PiperArmController:
         # Wait until the enable status is fully updated
         while not self.is_enabled:
             time.sleep(0.01)
+        time.sleep(.5)
         print("Piper arm motors enabled.")
 
     def disable(self) -> None:
