@@ -76,7 +76,7 @@ class ManualCalibrationBase(ABC):
         self.rotation_resolution = rotation_resolution
 
         # add task
-        taskMgr.doMethodLater(2, self.sync_rbt, "sync rbt", )
+        taskMgr.doMethodLater(5, self.sync_rbt, "sync rbt", )
         taskMgr.add(self.adjust, "manual adjust the mph")
         taskMgr.doMethodLater(5, self.sync_pcd, "sync mph", )
 
@@ -237,7 +237,7 @@ class ManualCalibrationBase(ABC):
             self._plot_node_rbt.detach()
         if self._plot_node_pcd is not None:
             self._plot_node_pcd.detach()
-        self._plot_node_rbt = self._rbt_s.gen_meshmodel(alpha=1)
+        self._plot_node_rbt = self._rbt_s.gen_meshmodel(alpha=0)
         self._plot_node_rbt.attach_to(base)
         pcd = self._pcd
         if pcd is not None:
@@ -387,8 +387,8 @@ if __name__ == "__main__":
 
     xarm_mc = RealmanManualCalib(rbt_s=rbt_left, rbt_x=rbtx_left, sensor_hdl=rs_pipe,
                                  init_calib_mat=init_mat,
-                                 move_resolution=0.05,
-                                 rotation_resolution=np.radians(30))
+                                 move_resolution=0.005,
+                                 rotation_resolution=np.radians(10))
     
     # 同步右臂的任务
     right_arm = None

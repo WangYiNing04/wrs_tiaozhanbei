@@ -76,9 +76,9 @@ class ManualCalibrationBase(ABC):
         self.rotation_resolution = rotation_resolution
 
         # add task
-        taskMgr.doMethodLater(2, self.sync_rbt, "sync rbt", )
+        taskMgr.doMethodLater(5, self.sync_rbt, "sync rbt", )
         taskMgr.add(self.adjust, "manual adjust the mph")
-        taskMgr.doMethodLater(1, self.sync_pcd, "sync mph", )
+        taskMgr.doMethodLater(5, self.sync_pcd, "sync mph", )
 
     @abstractmethod
     def get_pcd(self) -> np.ndarray:
@@ -209,7 +209,7 @@ class ManualCalibrationBase(ABC):
             self._plot_node_rbt.detach()
         if self._plot_node_pcd is not None:
             self._plot_node_pcd.detach()
-        self._plot_node_rbt = self._rbt_s.gen_meshmodel(alpha=.8)
+        self._plot_node_rbt = self._rbt_s.gen_meshmodel(alpha=0)
         self._plot_node_rbt.attach_to(base)
         pcd = self._pcd
         if pcd is not None:
@@ -367,7 +367,7 @@ if __name__ == "__main__":
     rbtx_right = PiperArmController(can_name="can1", has_gripper=True)
 
     #左臂base与世界坐标系重合
-    rbt_left = Piper(enable_cc=True, rotmat=rm.rotmat_from_euler(0, 0, 0), name='piper_left')
+    rbt_left = Piper(enable_cc=True, rotmat=rm.rotmat_from_euler(0, 0, 0),pos=[0, 0.6, 0], name='piper_left')
     
     # #右臂在world Y轴 -0.6m处
     rbt_right = Piper(enable_cc=True, rotmat=rm.rotmat_from_euler(0, 0, 0),pos=[0, -0.6, 0], name='piper_right')
@@ -388,10 +388,10 @@ if __name__ == "__main__":
 
     xarm_mc = RealmanManualCalib(rbt_s=rbt_right, rbt_x=rbtx_right, sensor_hdl=rs_pipe,
                                  init_calib_mat=init_mat,
-                                 move_resolution=0.05,
-                                 rotation_resolution=np.radians(30))
+                                 move_resolution=0.005,
+                                 rotation_resolution=np.radians(10))
     
-        # 同步右臂的任务
+        
     left_arm = None
 
     def sync_left_arm(task):
