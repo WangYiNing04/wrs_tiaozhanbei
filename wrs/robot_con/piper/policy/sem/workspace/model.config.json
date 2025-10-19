@@ -1,0 +1,46 @@
+{
+    "__config_type__": "onnx_model:OnnxSEMModelConfig",
+    "class_type": "onnx_model:OnnxSEMModel",
+    "onnx_path": "/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/robot_con/piper/policy/sem/workspace",
+    "test_noise_scheduler": {
+        "type": "diffusers.schedulers.scheduling_dpmsolver_multistep:DPMSolverMultistepScheduler",
+        "num_train_timesteps": 1000,
+        "beta_schedule": "squaredcos_cap_v2",
+        "prediction_type": "sample"
+    },
+    "data_preprocessor": {
+        "type": "robo_orchard_lab.models.layers.data_preprocessors:BaseDataPreprocessor",
+        "mean": [
+            123.675,
+            116.28,
+            103.53
+        ],
+        "std": [
+            58.395,
+            57.12,
+            57.375
+        ],
+        "channel_flip": false,
+        "unsqueeze_depth_channel": true,
+        "batch_transforms": [
+            {
+                "type": "robo_orchard_lab.models.bip3d.spatial_enhancer:BatchDepthProbGTGenerator",
+                "min_depth": 0.01,
+                "max_depth": 1.2,
+                "num_depth": 128,
+                "origin_stride": 2,
+                "valid_threshold": 0.5,
+                "stride": [
+                    8,
+                    16,
+                    32
+                ]
+            }
+        ]
+    },
+    "num_inference_timesteps": 10,
+    "strides": [
+        16,
+        32
+    ]
+}
