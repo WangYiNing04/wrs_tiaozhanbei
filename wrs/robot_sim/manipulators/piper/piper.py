@@ -278,10 +278,11 @@ if __name__ == '__main__':
     # Visual test for the Piper arm model.
     base = wd.World(cam_pos=[2, 0, 1], lookat_pos=[0, 0, 0])
     mgm.gen_frame().attach_to(base)
-    arm = Piper(enable_cc=True)
+    arm = Piper(enable_cc=True,rotmat=rm.rotmat_from_euler(0, 0, np.pi/2))
     # arm.fix_to(pos=np.array([0.1, 0.024, 0.3133]),
     #            rotmat=rm.rotmat_from_euler(0.3, 0.8, 1.0))
     arm.fk(arm.rand_conf(), update=True)
+
     arm.gen_meshmodel().attach_to(base)
     # arm.show_cdprim()
     base.run()
