@@ -1,3 +1,11 @@
+'''
+Author: wang yining
+Date: 2025-10-20 20:49:36
+LastEditTime: 2025-10-21 16:13:58
+FilePath: /wrs_tiaozhanbei/my_project/tiaozhanbei/grasp/piper_gripper_planning.py
+Description: 
+e-mail: wangyining0408@outlook.com
+'''
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # @Time : 2025/10/19 11:01
@@ -16,9 +24,9 @@ gripper = pg.PiperGripper()
 grasp_collection = gpa.plan_gripper_grasps(gripper,
                                            obj_cmodel,
                                            angle_between_contact_normals=rm.radians(175),
-                                           rotation_interval=rm.radians(15),
+                                           rotation_interval=rm.radians(45),
                                            max_samples=50,
-                                           min_dist_between_sampled_contact_points=.1,
+                                           min_dist_between_sampled_contact_points=.03,
                                            contact_offset=.02,
                                            toggle_dbg=False)
 

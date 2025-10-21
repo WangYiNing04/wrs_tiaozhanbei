@@ -45,9 +45,9 @@ class RGBImageCollector:
 
             # 从配置中提取相机ID
             camera_roles = {
-                'head': camera_config['head_camera']['ID'],
-                'left_hand': camera_config['left_hand_camera']['ID'],
-                'right_hand': camera_config['right_hand_camera']['ID']
+                'middle': camera_config['middle_camera']['ID'],
+                #'left': camera_config['left_camera']['ID'],
+                #'right': camera_config['right_camera']['ID']
             }
 
             # 查找实际连接的设备
@@ -84,25 +84,14 @@ class RGBImageCollector:
         
         for camera_name, image in images_dict.items():
             if image is not None:
-                # 创建相机专用目录
                 camera_dir = self.save_dir / camera_name
                 camera_dir.mkdir(exist_ok=True)
                 
-                # 保存图片
                 filename = f"{camera_name}_{timestamp}_{self.image_count:06d}.jpg"
                 filepath = camera_dir / filename
                 
-                # 确保图像是BGR格式（OpenCV保存需要）
-                if len(image.shape) == 3 and image.shape[2] == 3:
-                    # 如果是RGB格式，转换为BGR
-                    if image.dtype == np.uint8:
-                        bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                    else:
-                        bgr_image = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                else:
-                    bgr_image = image
-                
-                cv2.imwrite(str(filepath), bgr_image)
+                # 直接保存 RGB 图像（不转换）
+                cv2.imwrite(str(filepath), image)
                 print(f"保存图片: {filepath}")
     
     def collect_single_frame(self):

@@ -14,6 +14,23 @@ import wrs.basis.robot_math as rm
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+def cam_to_world(cam_point, T_cam_world):
+    cam_point_h = np.append(cam_point, 1)
+    world_point_h = T_cam_world @ cam_point_h
+    return world_point_h[:3] / world_point_h[3]
+
+def pixel_to_3d(u, v, depth_image, K):
+    """
+    将图像像素点(u, v)转换为相机坐标系下的3D点坐标
+    """
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    depth = depth_image[v, u]  # 注意OpenCV图像的索引是[y, x]
+    X = (u - cx) * depth / fx
+    Y = (v - cy) * depth / fy
+    Z = depth
+    return np.array([X, Y, Z])
 class RealTimeYOLODetector:
     """实时YOLO检测器，支持多相机同时预览和YOLO实时推理"""
     
@@ -47,7 +64,7 @@ class RealTimeYOLODetector:
             print("3D关键点检测已启用")
 
         #middle camera hand-eye matrix
-        self._init_calib_mat = np.array([[0.009037022325476372, -0.6821888672799827, 0.7311201572213072, -0.00295266], 
+        self.init_calib_mat = np.array([[0.009037022325476372, -0.6821888672799827, 0.7311201572213072, -0.00295266], 
                                             [-0.9999384009275621, -0.010877202709892496, 0.0022105256641201097, -0.28066693000000004], 
                                             [0.006444543204378151, -0.7310950959833536, -0.6822451433307909, 0.51193761], 
                                             [0.0, 0.0, 0.0, 1.0]]
@@ -113,7 +130,8 @@ class RealTimeYOLODetector:
         )
         
         return annotated_image, results
-    
+
+
     def start_detection_mode(self):
         """
         启动检测模式，支持实时预览和键盘控制
@@ -127,6 +145,7 @@ class RealTimeYOLODetector:
         self.detection_active = True
         
         try:
+<<<<<<< HEAD
             # 实时显示画面
             while self.detection_active:
                 display_images = {}
@@ -440,7 +459,7 @@ class RealTimeYOLODetector:
     #     return pcd_r
     
     def align_pcd(self, pcd):
-        c2w_mat = self._init_calib_mat  # 相机到世界的变换矩阵
+        c2w_mat = self.init_calib_mat  # 相机到世界的变换矩阵
         return rm.transform_points_by_homomat(c2w_mat, points=pcd)
     
     def print_cropped_pointcloud_with_center(self, cropped_pcd, camera_role):
