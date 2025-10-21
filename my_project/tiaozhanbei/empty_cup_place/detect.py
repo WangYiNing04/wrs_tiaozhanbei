@@ -13,23 +13,6 @@ from ultralytics import YOLO  # 导入YOLO模型
 from typing import Optional, List, Tuple
 import wrs.basis.robot_math as rm
 
-def cam_to_world(cam_point, T_cam_world):
-    cam_point_h = np.append(cam_point, 1)
-    world_point_h = T_cam_world @ cam_point_h
-    return world_point_h[:3] / world_point_h[3]
-
-def pixel_to_3d(u, v, depth_image, K):
-    """
-    将图像像素点(u, v)转换为相机坐标系下的3D点坐标
-    """
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
-
-    depth = depth_image[v, u]  # 注意OpenCV图像的索引是[y, x]
-    X = (u - cx) * depth / fx
-    Y = (v - cy) * depth / fy
-    Z = depth
-    return np.array([X, Y, Z])
 class RealTimeYOLODetector:
     """实时YOLO检测器，支持多相机同时预览和YOLO实时推理"""
     
@@ -60,13 +43,11 @@ class RealTimeYOLODetector:
             print("3D关键点检测已启用")
 
             #middle camera hand-eye matrix
-        self.init_calib_mat = np.array([[0.009037022325476372, -0.6821888672799827, 0.7311201572213072, -0.005952660000000002], 
-                                        [-0.9999510595357545, -0.0032207362923827865, 0.009354728314912606, -0.29216693000000005], 
-                                        [-0.004026949218072192, -0.7311689132939365, -0.6821845872491676, 0.4989376100000013], 
-                                        [0.0, 0.0, 0.0, 1.0]]
-                                        )
-
-
+            self._init_calib_mat = np.array([[0.009037022325476372, -0.6821888672799827, 0.7311201572213072, -0.00295266], 
+                                             [-0.9999384009275621, -0.010877202709892496, 0.0022105256641201097, -0.28066693000000004], 
+                                             [0.006444543204378151, -0.7310950959833536, -0.6822451433307909, 0.51193761], 
+                                             [0.0, 0.0, 0.0, 1.0]]
+                                            )
 
     def initialize_cameras(self):
         """初始化相机"""
@@ -128,8 +109,7 @@ class RealTimeYOLODetector:
         )
         
         return annotated_image, results
-
-
+    
     def start_detection_mode(self):
         """
         启动检测模式，支持实时预览和键盘控制
@@ -142,106 +122,41 @@ class RealTimeYOLODetector:
         
         self.detection_active = True
         
-        def on_release(key):
-            if key == keyboard.Key.esc:
-                self.detection_active = False
-                print("退出检测模式...")
-                return False  # 停止监听器
-            return None
-        
-        # 启动键盘监听
-        try:
-            with keyboard.Listener(on_release=on_release) as key_listener:
-                # 实时显示画面
-                while self.detection_active:
-                    display_images = {}
-                    
-                    for role, pipeline in self.rs_pipelines.items():
-                        try:
-                            pcd, pcd_color, depth_img, color_img = pipeline.get_pcd_texture_depth()
+  
+        for role, pipeline in self.rs_pipelines.items():
+            try:
+                pcd, pcd_color, depth_img, color_img = pipeline.get_pcd_texture_depth()
+                # 使用YOLO进行推理
+                annotated_img, results = self.run_yolo_inference(color_img)
+                K =  pipeline.intr_mat
+                #world2cam
+                #pcd = self.align_pcd(pcd)
 
-                            print(depth_img)
-                            print(depth_img.shape)
-                            print(color_img.shape)
-                            # 使用YOLO进行推理
-                            annotated_img, results = self.run_yolo_inference(color_img)
-                            K = pipeline.intr_mat
-                            #world2cam
-                            pcd = self.align_pcd(pcd)
+                keypoints = results[0].keypoints.xy
+                if len(keypoints) >= 2:
+                    cup_kp = keypoints[0]
+                    coaster_kp = keypoints[1]
+                    print(f"杯子关键点: {cup_kp}")
+                    print(f"杯垫关键点: {coaster_kp}")
+                
+                
+                point_3d = pcd[v, u]  # (x, y, z)
+                pcd_3d_world = self.align_pcd(point_3d)
 
-                            keypoints = results[0].keypoints.xy
-                            print(results[0].keypoints)
-                            #print(results)
-                            print(keypoints)
-                            keypoints = keypoints.cpu().numpy().reshape(-1, 2).tolist()
-                            print(keypoints)
-                            if len(keypoints) >= 2:
-                                cup_kp = keypoints[0]
-                                coaster_kp = keypoints[1]
-                                print(f"杯子关键点: {cup_kp}")
-                                print(f"杯垫关键点: {coaster_kp}")
+                print(pcd_3d_world)
 
-                            x, y = coaster_kp
-                            u, v = int(y), int(x)  # pcd[u, v] = pcd[y, x]
-
-                            # 假设你已经有深度图 depth_image 和相机内参 K
-                            depth_img = depth_img / 1000
-                            print(K)
-                            print(u,v)
-                            cam_point = pixel_to_3d(v, u, depth_img, K)
-                            world_point = self.align_pcd(cam_point)
-
-                            print("3D位置（相机坐标系）:", cam_point)
-                            print("3D位置（世界坐标系）:", world_point)
-
-
-                            #将2Dkeypoint转为3Dkeypoint
-                            keypoints_xyzkey = self.keypointsTo3D(pcd_tf=pcd,keypoints=keypoints,color_img=color_img)
-
-                       
-
-                            display_images[role] = annotated_img if annotated_img is not None else color_img
-                        except Exception as e:
-                            print(f"从 {role} 相机获取图像失败: {e}")
-                            display_images[role] = None
-                    
-                    # 显示所有相机画面
-                    for role, image in display_images.items():
-                        if image is not None:
-                            # 在图像上添加信息
-                            info_text = f"{role} Camera"
-                            cv2.putText(image, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                            
-                            # 显示FPS信息
-                            fps_text = "FPS: Calculating..."
-                            if hasattr(self, 'fps'):
-                                fps_text = f"FPS: {self.fps:.2f}"
-                            cv2.putText(image, fps_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                            
-                            cv2.imshow(f"{role.capitalize()} Camera (YOLO)", image)
-                    
-                    # 计算FPS
-                    if not hasattr(self, 'prev_time'):
-                        self.prev_time = time.time()
-                        self.fps_counter = 0
-                    else:
-                        self.fps_counter += 1
-                        if self.fps_counter >= 10:  # 每10帧计算一次FPS
-                            curr_time = time.time()
-                            self.fps = self.fps_counter / (curr_time - self.prev_time)
-                            self.prev_time = curr_time
-                            self.fps_counter = 0
-                    
-                    # 检查ESC键
-                    if cv2.waitKey(1) == 27:  # ESC退出
-                        break
-                        
-        except Exception as e:
-            print(f"检测过程中发生错误: {e}")
-        finally:
-            # 清理资源
-            self.cleanup()
-
+            
+       
+                points = keypoints.cpu().numpy().reshape(-1, 2).tolist()
+                
+                #将2Dkeypoint转为3Dkeypoint
+                keypoints_xyzkey = self.keypointsTo3D(pcd_tf=pcd,keypoints=points,color_img=color_img)
+       
+                print(keypoints_xyzkey)
+            except Exception as e:
+                print(f"从 {role} 相机获取数据失败: {e}")
+               
+    
     def estimate_point_from_neighborhood(
             self,
             target_pixel: np.ndarray,
@@ -321,8 +236,6 @@ class RealTimeYOLODetector:
         else:
             return None
 
-
-    
     def cleanup(self):
         """清理资源"""
         print("正在清理资源...")
@@ -379,34 +292,8 @@ class RealTimeYOLODetector:
                 # or just skip it as is currently done.
         return np.asarray(detected_points_xyz)
     
-    # hand in eye
-    # def transform_point_cloud_handeye(self,
-    #             handeye_mat: np.ndarray,
-    #             pcd: np.ndarray,
-    #             given_conf: np.ndarray = None,
-    #             component_name: Literal['rgt_arm', 'lft_arm'] = 'rgt_arm',
-    #             toggle_debug=False,
-    #             ):
-    #     if component_name == 'rgt_arm':
-    #         arm = self.rgt_arm
-    #     elif component_name == 'lft_arm':
-    #         arm = self.lft_arm
-    #     else:
-    #         raise ValueError("component_name must be either 'rgt_arm' or 'lft_arm'.")
-    #     if given_conf is None:
-    #         given_conf = self.rgt_arm.get_jnt_values()
-    #     gl_tcp_pos, gl_tcp_rotmat = arm.fk(given_conf, update=False)
-    #     if hasattr(arm, 'end_effector') and arm.end_effector is not None:
-    #         gl_tcp_pos = gl_tcp_pos - gl_tcp_rotmat @ arm.manipulator.loc_tcp_pos
-    #     w2r_mat = rm.homomat_from_posrot(gl_tcp_pos, gl_tcp_rotmat)
-    #     w2cam = w2r_mat.dot(handeye_mat)
-    #     pcd_r = rm.transform_points_by_homomat(w2cam, pcd)
-    #     if toggle_debug:
-    #         gm.gen_frame(w2cam[:3, 3], w2cam[:3,:3]).attach_to(base)
-    #     return pcd_r
-    
     def align_pcd(self, pcd):
-        c2w_mat = self.init_calib_mat  # 相机到世界的变换矩阵
+        c2w_mat = self._init_calib_mat  # 相机到世界的变换矩阵
         return rm.transform_points_by_homomat(c2w_mat, points=pcd)
     
    
@@ -423,7 +310,7 @@ def main():
         )
         
         # 启动检测模式
-        detector.start_detection_mode()
+        #detector.start_detection_mode()
         
     except KeyboardInterrupt:
         print("程序被用户中断")
@@ -431,6 +318,81 @@ def main():
         print(f"程序运行出错: {e}")
     finally:
         print("程序结束")
+
+
+    import numpy as np
+
+    def pixel_to_world(u, v, depth, K, extrinsic):
+        """
+        根据像素坐标和深度，计算该点在世界坐标系中的位置
+
+        参数:
+            u, v: 像素坐标
+            depth: 深度值 (Zc)
+            K: 3x3 相机内参矩阵
+            extrinsic: 4x4 相机外参矩阵 (T_cam_world)
+
+        返回:
+            world_point: 世界坐标 (Xw, Yw, Zw)
+        """
+        # 内参逆矩阵
+        K_inv = np.linalg.inv(K)
+
+        # 像素坐标转相机坐标
+        pixel_h = np.array([u, v, 1.0])
+        cam_point = depth * (K_inv @ pixel_h)
+
+        # 转为齐次坐标
+        cam_point_h = np.append(cam_point, 1.0)
+
+        # 相机->世界坐标 (注意外参为 T_cam_world, 所以取逆)
+        T_world_cam = np.linalg.inv(extrinsic)
+        world_point_h = T_world_cam @ cam_point_h
+
+        # 去齐次
+        world_point = world_point_h[:3] / world_point_h[3]
+
+        return world_point
+
+
+    # 示例：
+  
+
+
+    # extrinsic = np.array([[0.009037022325476372, -0.6821888672799827, 0.7311201572213072, -0.00295266], 
+    #                                          [-0.9999384009275621, -0.010877202709892496, 0.0022105256641201097, -0.28066693000000004], 
+    #                                          [0.006444543204378151, -0.7310950959833536, -0.6822451433307909, 0.51193761], 
+    #                                          [0.0, 0.0, 0.0, 1.0]]
+    #                                         )
+
+    # u, v = 320, 240  # 图像中心
+    # depth = 1.2      # 深度为1.2米
+
+    # world_point = pixel_to_world(u, v, depth, K, extrinsic)
+    # print("World point:", world_point)
+    for role, pipeline in detector.rs_pipelines.items():
+
+        pcd, pcd_color, depth_img, color_img = pipeline.get_pcd_texture_depth()
+        # 使用YOLO进行推理
+        annotated_img, results = detector.run_yolo_inference(color_img)
+        print(results[0].keypoints)
+        keypoints = results[0].keypoints.xy
+
+        keypoints = keypoints.cpu().numpy().reshape(-1, 2).tolist()
+        print(keypoints)
+        if len(keypoints) >= 2:
+            cup_kp = keypoints[0]
+            coaster_kp = keypoints[1]
+            print(f"杯子关键点: {cup_kp}")
+            print(f"杯垫关键点: {coaster_kp}")
+        else:
+            raise ValueError("未检测到足够的的关键点（需要至少2个）")
+        u = coaster_kp[0] 
+        v = coaster_kp[1]
+        point_3d = pcd[v, u]  # (x, y, z)
+        pcd_3d_world = detector.align_pcd(point_3d)
+
+        print(pcd_3d_world)
 
 
 if __name__ == "__main__":

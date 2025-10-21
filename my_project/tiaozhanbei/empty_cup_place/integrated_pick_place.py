@@ -31,6 +31,11 @@ import json
 from datetime import datetime
 from pathlib import Path
 from wrs.robot_con.piper.piper import PiperArmController
+import time
+
+import cv2
+from ultralytics import YOLO
+import wrs.modeling.geometric_model as gm
 def create_grasp_collection(obj_path, save_path, gripper=None, base=None):
     """
     为指定物体创建抓取姿态集合
@@ -65,13 +70,17 @@ def create_grasp_collection(obj_path, save_path, gripper=None, base=None):
         obj_cmodel,
         angle_between_contact_normals=rm.radians(175),
         rotation_interval=rm.radians(15),
-        max_samples=50,
+        max_samples=100,
         min_dist_between_sampled_contact_points=.1,
-        contact_offset=.02,
+        contact_offset=.01,
         toggle_dbg=False
     )
     
     print(f"生成了 {len(grasp_collection)} 个抓取姿态")
+
+    
+    grasp_collection = grasp_collection.limit(20)
+    print(f"实际获取抓取数量: {len(grasp_collection)}")
     
     # 保存抓取姿态
     grasp_collection.save_to_disk(file_name=save_path)
@@ -84,7 +93,7 @@ def create_grasp_collection(obj_path, save_path, gripper=None, base=None):
     
     return grasp_collection
 
-def run_pick_place_task(obj_path, grasp_collection_path, start_pos, goal_pos, 
+def run_pick_place_task(robot,obj_path, grasp_collection_path, start_pos, goal_pos, 
                        start_rot=None, goal_rot=None, obstacle_list=None, base=None):
     """
     执行Pick-and-Place任务
@@ -144,7 +153,6 @@ def run_pick_place_task(obj_path, grasp_collection_path, start_pos, goal_pos,
     h2_copy.show_cdprim()
     
     # 创建机器人
-    robot = psa.PiperSglArm()
     robot.gen_meshmodel().attach_to(base)
     
     # 实例化规划器
@@ -166,6 +174,7 @@ def run_pick_place_task(obj_path, grasp_collection_path, start_pos, goal_pos,
         end_jnt_values=start_conf,
         grasp_collection=grasp_collection,
         goal_pose_list=goal_pose_list,
+        pick_approach_direction = rm.const.z_ax,
         place_approach_distance_list=[.05] * len(goal_pose_list),
         place_depart_distance_list=[.05] * len(goal_pose_list),
         pick_approach_distance=.05,
@@ -211,28 +220,47 @@ def animate_motion(mot_data, base):
             anime_data.counter += 1
         return task.again
 
-    taskMgr.doMethodLater(0.01, update, "update",
+    taskMgr.doMethodLater(0.1, update, "update",
                           extraArgs=[anime_data],
                           appendTask=True)
 
 def export_joint_trajectory(mot_data, save_dir=None, filename=None):
     """
-    导出关节角轨迹到JSON文件，便于真实机械臂部署
-    返回: (trajectory_list, saved_path)
+    导出关节角轨迹到JSON文件（包含机械臂关节角和夹爪宽度）
+    
+    Args:
+        mot_data: MotionData对象，需包含jv_list和ev_list
+        save_dir: 保存目录（默认使用预定义路径）
+        filename: 文件名（默认自动生成）
+    
+    Returns:
+        tuple: (trajectory_list, saved_path)
+               trajectory_list格式: [[j1, j2, ..., j6, gripper_width], ...]
     """
-    trajectory = [jnt_values.tolist() for jnt_values in mot_data.jv_list]
+    # 合并关节角和夹爪宽度
+    trajectory = [
+        jnt_values.tolist() + [ev]  # 将关节角和夹爪值合并
+        for jnt_values, ev in zip(mot_data.jv_list, mot_data.ev_list)
+    ]
+    
+    # 设置默认保存路径
     if save_dir is None:
-        save_dir = r"F:\wrs_tiaozhanbei\my_project\tiaozhanbei\empty_cup_place\exported"
+        save_dir = r"/home/wyn/PycharmProjects/wrs_tiaozhanbei/my_project/tiaozhanbei/empty_cup_place/exported"
     Path(save_dir).mkdir(parents=True, exist_ok=True)
+    
+    # 设置默认文件名
     if filename is None:
-        filename = f"joint_trajectory_empty_cup_place.json"
+        filename = f"joint_trajectory_with_gripper_empty_cup_place.json"
+    
+    # 保存为JSON文件
     saved_path = os.path.join(save_dir, filename)
     with open(saved_path, 'w', encoding='utf-8') as f:
         json.dump({"joint_trajectory": trajectory}, f, ensure_ascii=False, indent=2)
-    print(f"关节角列表已保存: {saved_path} (共 {len(trajectory)} 个点)")
+    
+    print(f"关节角+夹爪轨迹已保存: {saved_path} (共 {len(trajectory)} 个点)")
     return trajectory, saved_path
 
-def excute_move_j(arm: PiperArmController, json_path: str):
+def excute_motion(arm: PiperArmController, json_path: str):
     """
     从JSON文件读取关节角轨迹并逐点执行 move_j。
     要求每个轨迹点为6个关节角。
@@ -246,64 +274,73 @@ def excute_move_j(arm: PiperArmController, json_path: str):
     if not isinstance(data, dict) or 'joint_trajectory' not in data:
         raise ValueError("轨迹文件格式不正确，缺少 'joint_trajectory' 字段")
 
-    trajectory_raw = data['joint_trajectory']
-    if not isinstance(trajectory_raw, list):
-        raise ValueError("'joint_trajectory' 应为列表")
+    trajectory = data['joint_trajectory']
 
-    # 规整为6关节角的列表
-    trajectory: list[list[float]] = []
-    for idx, point in enumerate(trajectory_raw):
-        if not isinstance(point, (list, tuple)):
-            raise ValueError(f"第 {idx+1} 个轨迹点格式错误，应为列表/元组")
-        if len(point) < 6:
-            raise ValueError(f"第 {idx+1} 个轨迹点关节数不足: {len(point)} < 6")
-        jv6 = [float(point[i]) for i in range(6)]
-        trajectory.append(jv6)
+    print(trajectory)
+    # # 规整为6关节角的列表
+    # trajectory: list[list[float]] = []
+    # for idx, point in enumerate(trajectory_raw):
+    #     if not isinstance(point, (list, tuple)):
+    #         raise ValueError(f"第 {idx+1} 个轨迹点格式错误，应为列表/元组")
+    #     if len(point) < 6:
+    #         raise ValueError(f"第 {idx+1} 个轨迹点关节数不足: {len(point)} < 6")
+    #     jv6 = [float(point[i]) for i in range(6)]
+    #     trajectory.append(jv6)
 
     print(f"读取到 {len(trajectory)} 个关节轨迹点，将依次执行 move_j（6轴）...")
 
     for i, jv in enumerate(trajectory):
         print(f"执行第 {i+1}/{len(trajectory)} 个点: {jv}")
-        arm.move_j(jv)
+        arm.move_j(jv[:6],speed=10)
+
+        time.sleep(0.2)
+
+        if jv[6] >= 0.08:
+            gripper_width = 0.04
+        else:
+            gripper_width = 0.0
+        print(gripper_width)
+        arm.gripper_control(angle=gripper_width,effort=0)
 
 
 def main():
     """
     主函数：完整的抓取规划和Pick-and-Place任务流程
     """
+    visualize = True
     #初始化
     left_arm_con = PiperArmController(can_name='can0', has_gripper=True)
     right_arm_con = PiperArmController(can_name='can1', has_gripper=True)
     # 文件路径配置
-    obj_path = r"F:\wrs_tiaozhanbei\0000_examples\objects\tiaozhanbei\cup.stl"
-    grasp_save_path = r"F:\wrs_tiaozhanbei\my_project\tiaozhanbei\empty_cup_place\piper_gripper_grasps.pickle"
+    obj_path = r"/home/wyn/PycharmProjects/wrs_tiaozhanbei/0000_examples/objects/tiaozhanbei/cup.stl"
+    grasp_save_path = r"/home/wyn/PycharmProjects/wrs_tiaozhanbei/my_project/tiaozhanbei/empty_cup_place/piper_gripper_grasps.pickle"
+    #yolo_model = YOLO("./model/empty_cup_place/best.pt")
+    gripper = pg.PiperGripper()
+    arm = left_arm_con  # 或根据其他逻辑初始化
+    
 
-    #######################################################################
-    #检测杯子位置
-    #######################################################################
-    #初始化点云检测
-  
+
+    #检测杯子位置和杯垫位置
     #创建处理器（会自动初始化相机）
     processor = PointCloudProcessor()
-
     # 启动相机流 返回杯口中心点
-    x,y,z = processor.start_camera_stream()
-    
+    cup_x,cup_y,cup_z,coaster_x,coaster_y,coaster_z = processor.start_camera_stream()
     #处理杯口坐标
-    z = z - 7.5
+    #cup_z = cup_z - 0.075
+    cup_z = 0
+    print(cup_x,cup_y,cup_z)
+    #cup_x,cup_y,cup_z = 0.3397, -0.2887, 0
 
-    cup_x,cup_y,cup_z = 0.3397, -0.2887, 0
-    #######################################################################
     
 
-    #######################################################################
-    #检测杯垫
-    #######################################################################
-
-    coaster_x,coaster_y,coaster_z = 0.378, -0.099417, 0
-    #######################################################################
-
-
+    #得到杯子位置后判断使用哪只手抓取
+    if cup_y > -0.3:
+        arm = left_arm_con
+        robot = psa.PiperSglArm()
+    else:
+        arm = right_arm_con
+        robot = psa.PiperSglArm(pos = [0,-0.6,0])
+        
     #设定杯子位置和杯垫位置
     start_pos = [cup_x, cup_y, cup_z]  # 杯子位置
     goal_pos = [coaster_x, coaster_y, coaster_z]  # 杯垫位置
@@ -315,22 +352,14 @@ def main():
     base = wd.World(cam_pos=[1.2, .7, 1], lookat_pos=[.0, 0, .15])
     mgm.gen_frame().attach_to(base)
     
-    # 检查抓取姿态文件是否存在
-    if not os.path.exists(grasp_save_path):
-        print("抓取姿态文件不存在，正在生成...")
-        grasp_collection = create_grasp_collection(obj_path, grasp_save_path, base=base)
-    else:
-        print("使用已存在的抓取姿态文件")
-    
-    # 定义任务参数
 
-    #start_pos and start_rot 物体的现实位置
-    #goal_pos and goal_rot   物体的目标放置位置
-    # start_pos = [0.3397, -0.2887, 0]  
-    # goal_pos = [0.378, -0.099417, 0]  
-    # start_rot = rm.rotmat_from_euler(0, 0, 0)  
-    # goal_rot = rm.rotmat_from_euler(0, 0, 0)   
+    #考虑使用固定的抓取姿势
+    print("正在生成新的抓取姿态（覆盖已有文件）...")
+    grasp_collection = create_grasp_collection(obj_path, grasp_save_path, base=base, gripper=gripper)
 
+    # grasp_collection = gg.GraspCollection.load_from_disk(
+    # file_name=r'/home/wyn/PycharmProjects/wrs_tiaozhanbei/my_project/tiaozhanbei/task_sim/piper_gripper_grasps.pickle')
+   
     box1 = mcm.gen_box(xyz_lengths=[0.8, 1.4, 1], pos=np.array([0.34, -0.2985, -0.5]))
     box1.attach_to(base)
     box2 = mcm.gen_box(xyz_lengths=[0.03, 0.03, 0.555], pos=np.array([-0.05, -0.2985, 0.2775]))
@@ -346,6 +375,7 @@ def main():
     try:
         # 执行Pick-and-Place任务
         result = run_pick_place_task(
+            robot,
             obj_path=obj_path,
             grasp_collection_path=grasp_save_path,
             start_pos=start_pos,
@@ -360,6 +390,21 @@ def main():
             mot_data = result
             # 导出关节角轨迹供真实机械臂使用
             trajectory, traj_path = export_joint_trajectory(mot_data)
+            #得到杯子位置后判断使用哪只手抓取
+            if cup_y > -0.3:
+                arm = left_arm_con
+            else:
+                arm = right_arm_con
+                
+            traj_path = r"/home/wyn/PycharmProjects/wrs_tiaozhanbei/my_project/tiaozhanbei/empty_cup_place/exported/joint_trajectory_with_gripper_empty_cup_place.json"
+
+            #move_jspace_path ?
+
+            #先开夹爪
+            arm.gripper_control(angle=0.04,effort=0)
+            excute_motion(arm,traj_path)
+
+            #可视化结果
             # 示例：打印前3个关节角
             for idx, jv in enumerate(trajectory[:3]):
                 print(f"轨迹点 {idx+1}: {jv}")
@@ -370,21 +415,23 @@ def main():
         else:
             print("任务执行失败！")
             print("启动基础3D环境...")
+
+            arm.move_j([0, 0, 0, 0, 0, 0], speed=20)
+            for grasp in grasp_collection:
+                gripper.grip_at_by_pose(grasp.ac_pos, grasp.ac_rotmat, grasp.ee_values)
+                gripper.gen_meshmodel(alpha=1).attach_to(base)
+
             base.run()
+
     except Exception as e:
         print(f"执行过程中出现错误: {e}")
         print("启动基础3D环境...")
+
+        arm.move_j([0, 0, 0, 0, 0, 0], speed=20)
         base.run()
 
 
-    #得到杯子位置后判断使用哪只手抓取
-    if y > -0.3:
-        arm = left_arm_con
-    else:
-        arm = right_arm_con
-        
-    traj_path = r"F:\wrs_tiaozhanbei\my_project\tiaozhanbei\empty_cup_place\exported\joint_trajectory_empty_cup_place.json"
-    excute_move_j(arm,traj_path)
+  
 
 if __name__ == '__main__':
     main()
