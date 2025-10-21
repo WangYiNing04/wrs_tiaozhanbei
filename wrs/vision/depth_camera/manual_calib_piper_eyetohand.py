@@ -384,57 +384,6 @@ class MultiCameraManualCalib(ManualCalibrationBase):
         if task is not None:
             return task.again
 
-# if __name__ == "__main__":
-#     import numpy as np
-#     import wrs.visualization.panda.world as wd
-#     from wrs.drivers.devices.realsense.realsense_d400s import RealSenseD400
-#     #from wrs.robot_con.realman.realman import RealmanArmController
-#     from wrs.robot_con.piper.piper import PiperArmController
-#     #from wrs.robot_sim.manipulators.realman_arm.RM65_6FB import Realman
-#     from wrs.robot_sim.manipulators.piper.piper import Piper
-
-# # middle:
-# #   ID: '243322073422'
-# # left:
-# #   ID: '243322074546'
-# # right:
-# #   ID: '243322071033'
-
-#     left_can = 'can0'
-#     right_can = 'can1'
-#     cam_id = ['243322073422','243322074546','243322071033']
-#     rs_pipe = {}
-#     for id in cam_id:
-#         rs_pipe[id] = RealSenseD400(device=id)
-
-#     base = wd.World(cam_pos=[0, 2, 0], lookat_pos=[0, 0, 0], lens_type=2)
-
-#     # the first frame contains no data informationF
-#     for cam in rs_pipe:
-#         cam.get_pcd_texture_depth()
-#         cam.get_pcd_texture_depth()
-
-#     rbtx_left = PiperArmController(can_name=left_can, has_gripper=True)
-#     rbtx_right = PiperArmController(can_name=right_can, has_gripper=True)
-   
-#     rbt_left = Piper(enable_cc=True,rotmat=rm.rotmat_from_euler(0, 0, 0))
-#     rbt_right = Piper(enable_cc=True,rotmat=rm.rotmat_from_euler(0, 0, 0),pos=[0, -0.6, 0])
-
-#     # 加载初始标定矩阵
-#     init_mat_left = load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_left.json")
-#     init_mat_middle = load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_middle.json")
-#     init_mat_right = load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_right.json")
-
-#     mgm.gen_frame(ax_length=1).attach_to(base)
-
-#     # xarm_mc = RealmanManualCalib(rbt_s=rbt_left, rbt_x=rbtx_left, sensor_hdl=rs_pipe,
-#     #                              init_calib_mat=init_mat_left,
-#     #                              move_resolution=0.05,
-#     #                              rotation_resolution=np.radians(30))
-    
-#     base.run()
-
-
 # middle:
 #   ID: '243322073422'
 # left:
@@ -450,9 +399,9 @@ if __name__ == "__main__":
 
     base = wd.World(cam_pos=[0, 2, 0], lookat_pos=[0, 0, 0], lens_type=2)
 
-    # 三个相机
-    #cam_ids = ['243322074546', '240722074122', '241522073998']
-    cam_ids = ['243322074546']
+
+    # middle
+    cam_ids = ['243322073422']
     sensors = [RealSenseD400(device=cid) for cid in cam_ids]
     for s in sensors:
         s.get_pcd_texture_depth()  # warm-up
@@ -463,8 +412,8 @@ if __name__ == "__main__":
 
     # 读取三个标定矩阵
     init_mats = [
-        #load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_middle.json"),
-        load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_left.json"),
+        load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_middle.json"),
+        #load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_left.json"),
         #load_calibration_matrix_from_json("/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/vision/depth_camera/manual_calibration_piper_right.json"),
     ]
 

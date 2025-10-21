@@ -403,19 +403,183 @@ def main():
 
         
 
-        print("Loading model...")
-        model = ModelMixin.load_model(
-            output_path, 
-            load_weight=False,
-            device=device,         # ✅ 指定 GPU
-            load_impl="accelerate",   # ✅ 使用 accelerate 后端（默认即可）
-            )
-   
-        model.eval()
-        #print(f"✅ Model loaded on device: {next(model.parameters()).device}")
-       
+        print("Loading ONNX model...")
         import onnxruntime as ort
-        print(ort.get_device()) 
+        print(f"ONNX Runtime available devices: {ort.get_device()}")
+        
+        # 加载ONNX模型配置
+        model_config_path = os.path.join(output_path, "model.config.json")
+        with open(model_config_path, 'r') as f:
+            model_config = json.load(f)
+        
+        # 查找ONNX模型文件 - 支持encoder和decoder两个模型
+        onnx_files = [f for f in os.listdir(output_path) if f.endswith('.onnx')]
+        if not onnx_files:
+            raise FileNotFoundError(f"No ONNX model found in {output_path}")
+        
+        # 查找encoder和decoder模型文件
+        encoder_model_path = None
+        decoder_model_path = None
+        
+        for onnx_file in onnx_files:
+            if 'encoder' in onnx_file.lower():
+                encoder_model_path = os.path.join(output_path, onnx_file)
+            elif 'decoder' in onnx_file.lower():
+                decoder_model_path = os.path.join(output_path, onnx_file)
+        
+        # 如果没有找到明确的encoder/decoder文件，使用第一个文件作为默认模型
+        if not encoder_model_path and not decoder_model_path:
+            print("Warning: No encoder/decoder specific ONNX files found, using single model approach")
+            single_model_path = os.path.join(output_path, onnx_files[0])
+            encoder_model_path = single_model_path
+            decoder_model_path = single_model_path
+        elif not encoder_model_path:
+            print("Warning: No encoder ONNX file found, using decoder model for both")
+            encoder_model_path = decoder_model_path
+        elif not decoder_model_path:
+            print("Warning: No decoder ONNX file found, using encoder model for both")
+            decoder_model_path = encoder_model_path
+        
+        print(f"Loading Encoder ONNX model from: {encoder_model_path}")
+        print(f"Loading Decoder ONNX model from: {decoder_model_path}")
+        
+        # 配置ONNX Runtime providers
+        providers = []
+        if device.type == 'cuda':
+            providers.append('CUDAExecutionProvider')
+        providers.append('CPUExecutionProvider')
+        
+        # 创建ONNX推理会话
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        
+        # 根据模型配置设置推理步数
+        num_inference_timesteps = model_config.get('num_inference_timesteps', 10)
+        print(f"Using {num_inference_timesteps} inference timesteps")
+        
+        # 创建encoder和decoder会话
+        encoder_session = ort.InferenceSession(
+            encoder_model_path, 
+            providers=providers,
+            sess_options=session_options
+        )
+        
+        decoder_session = ort.InferenceSession(
+            decoder_model_path, 
+            providers=providers,
+            sess_options=session_options
+        )
+        
+        # 获取encoder输入输出信息
+        encoder_input_names = [input.name for input in encoder_session.get_inputs()]
+        encoder_output_names = [output.name for output in encoder_session.get_outputs()]
+        
+        # 获取decoder输入输出信息
+        decoder_input_names = [input.name for input in decoder_session.get_inputs()]
+        decoder_output_names = [output.name for output in decoder_session.get_outputs()]
+        
+        print(f"Encoder Model input names: {encoder_input_names}")
+        print(f"Encoder Model output names: {encoder_output_names}")
+        print(f"Decoder Model input names: {decoder_input_names}")
+        print(f"Decoder Model output names: {decoder_output_names}")
+        print(f"ONNX Model providers: {encoder_session.get_providers()}")
+        
+        # 加载数据预处理器配置
+        data_preprocessor_config = model_config.get('data_preprocessor', {})
+        if data_preprocessor_config:
+            print(f"Data preprocessor config loaded: {data_preprocessor_config.get('type', 'Unknown')}")
+        
+        # 加载ONNX模型类（用于后处理）
+        try:
+            from onnx_model import OnnxSEMModel
+            onnx_model_class = OnnxSEMModel(model_config)
+            print("ONNX model class loaded successfully")
+        except ImportError as e:
+            print(f"Warning: Could not import OnnxSEMModel: {e}")
+            onnx_model_class = None
+        
+        # 定义ONNX推理辅助函数
+        def run_onnx_inference(data_dict, input_names, output_names, session):
+            """执行ONNX推理的辅助函数"""
+            # 准备输入数据
+            onnx_inputs = {}
+            missing_inputs = []
+            
+            for name in input_names:
+                if name in data_dict:
+                    if isinstance(data_dict[name], torch.Tensor):
+                        onnx_inputs[name] = data_dict[name].cpu().numpy()
+                    else:
+                        onnx_inputs[name] = data_dict[name]
+                else:
+                    missing_inputs.append(name)
+            
+            if missing_inputs:
+                print(f"Warning: Missing inputs: {missing_inputs}")
+                print(f"Available data keys: {list(data_dict.keys())}")
+                return None
+            
+            try:
+                # 执行推理
+                onnx_outputs = session.run(output_names, onnx_inputs)
+                
+                # 转换输出格式
+                model_outs = {}
+                for i, output_name in enumerate(output_names):
+                    if i < len(onnx_outputs):
+                        model_outs[output_name] = torch.from_numpy(onnx_outputs[i]).to(device)
+                
+                return model_outs
+            except Exception as e:
+                print(f"ONNX inference error: {e}")
+                print(f"Input shapes: {[(name, inp.shape if hasattr(inp, 'shape') else type(inp)) for name, inp in onnx_inputs.items()]}")
+                return None
+        
+        # 定义双模型推理函数
+        def run_dual_onnx_inference(data_dict, encoder_session, decoder_session, 
+                                   encoder_input_names, encoder_output_names,
+                                   decoder_input_names, decoder_output_names):
+            """执行encoder-decoder双模型推理"""
+            # 第一步：执行encoder推理
+            encoder_start = time.time()
+            encoder_outs = run_onnx_inference(data_dict, encoder_input_names, encoder_output_names, encoder_session)
+            encoder_time = time.time() - encoder_start
+            inference_stats['encoder_inference_time'] += encoder_time
+            
+            if encoder_outs is None:
+                print("Encoder inference failed")
+                return None
+            
+            # 第二步：准备decoder输入（将encoder输出作为decoder输入）
+            decoder_data = data_dict.copy()
+            decoder_data.update(encoder_outs)
+            
+            # 第三步：执行decoder推理
+            decoder_start = time.time()
+            decoder_outs = run_onnx_inference(decoder_data, decoder_input_names, decoder_output_names, decoder_session)
+            decoder_time = time.time() - decoder_start
+            inference_stats['decoder_inference_time'] += decoder_time
+            
+            if decoder_outs is None:
+                print("Decoder inference failed")
+                return None
+            
+            # 合并encoder和decoder输出
+            final_outs = encoder_outs.copy()
+            final_outs.update(decoder_outs)
+            
+            return final_outs
+        
+        # 推理统计
+        inference_stats = {
+            'total_inferences': 0,
+            'successful_inferences': 0,
+            'failed_inferences': 0,
+            'total_inference_time': 0.0,
+            'encoder_inference_time': 0.0,
+            'decoder_inference_time': 0.0
+        } 
 
         #model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
 
@@ -430,8 +594,8 @@ def main():
 
        
     
-        # 预热模型（第一次推理通常较慢）
-        print("Warming up model...")
+        # 预热ONNX模型（第一次推理通常较慢）
+        print("Warming up ONNX models...")
         dummy_data = builder.build_multi_arm_data(
             instruction="dummy",
             camera_data_dict=None,
@@ -441,15 +605,30 @@ def main():
         )
         dummy_data = processor.pre_process(dummy_data)
         
-        # 将数据移至GPU
-        dummy_data = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                     for k, v in dummy_data.items()}
+        # 检查是否使用双模型推理
+        use_dual_model = (encoder_model_path != decoder_model_path)
         
-        with torch.no_grad():
-
-             _ = model(dummy_data)
-    
-        print("Model warmup completed.")
+        if use_dual_model:
+            print("Using dual model (encoder + decoder) inference")
+            warmup_result = run_dual_onnx_inference(
+                dummy_data, encoder_session, decoder_session,
+                encoder_input_names, encoder_output_names,
+                decoder_input_names, decoder_output_names
+            )
+        else:
+            print("Using single model inference")
+            warmup_result = run_onnx_inference(dummy_data, encoder_input_names, encoder_output_names, encoder_session)
+        
+        if warmup_result is not None:
+            print("ONNX model(s) warmup completed.")
+        else:
+            print("ONNX model(s) warmup failed.")
+            print("Available keys in dummy_data:", list(dummy_data.keys()))
+            if use_dual_model:
+                print("Required encoder input names:", encoder_input_names)
+                print("Required decoder input names:", decoder_input_names)
+            else:
+                print("Required input names:", encoder_input_names)
 
         step_count = 0
         max_steps = 1000  # 最大执行步数
@@ -475,21 +654,7 @@ def main():
                 start_time = time.time()
                 
 
-                # 定义模型路径 - 指向workspace目录
-                # output_path = os.path.join(os.path.dirname(__file__), "workspace")
 
-                # model = ModelMixin.load_model(output_path, load_weight=False)
-                # model = model.to(device)
-                # model.eval()
-
-                # processor_cfg = load_config_class(
-                #     open(f"{output_path}/processor.json").read()
-                # )
-                # with in_cwd(output_path):
-                #     processor = processor_cfg()
-
-                # # 清空GPU缓存
-                # torch.cuda.empty_cache()
 
                 # init data dict with imgs, depths, text, intrinsic, joint_state
 
@@ -498,24 +663,46 @@ def main():
                 preprocess_time = time.time() - preprocess_start
 
                 
-                # GPU推理
+                # ONNX推理
                 inference_start = time.time()
-                with torch.no_grad():
-                    model_outs = model(data)
+                
+                # 使用双模型或单模型推理
+                inference_stats['total_inferences'] += 1
+                if use_dual_model:
+                    model_outs = run_dual_onnx_inference(
+                        data, encoder_session, decoder_session,
+                        encoder_input_names, encoder_output_names,
+                        decoder_input_names, decoder_output_names
+                    )
+                else:
+                    model_outs = run_onnx_inference(data, encoder_input_names, encoder_output_names, encoder_session)
+                
+                if model_outs is None:
+                    inference_stats['failed_inferences'] += 1
+                    print("ONNX inference failed, skipping this step")
+                    continue
+                
+                inference_stats['successful_inferences'] += 1
                 inference_time = time.time() - inference_start
-
+                inference_stats['total_inference_time'] += inference_time
 
                 postprocess_start = time.time()
     
-                #print(f"model_outs content: {model_outs}")
-
-      
-                #model_outs = model(data)
-
-                
-                #64步
-                
-                actions = processor.post_process(batch = 1,model_outputs = model_outs).action
+                # 使用ONNX模型类进行后处理（如果可用）
+                if onnx_model_class is not None:
+                    try:
+                        # 使用ONNX模型类进行后处理
+                        actions = onnx_model_class.post_process(
+                            batch=1, 
+                            model_outputs=model_outs
+                        ).action
+                    except Exception as e:
+                        print(f"ONNX model post-processing failed: {e}")
+                        # 回退到原始processor后处理
+                        actions = processor.post_process(batch=1, model_outputs=model_outs).action
+                else:
+                    # 使用原始processor进行后处理
+                    actions = processor.post_process(batch=1, model_outputs=model_outs).action
 
                 postprocess_time = time.time() - postprocess_start
                 #print(actions)
@@ -531,6 +718,28 @@ def main():
                 
                 print(f"Inference time: {inference_time:.3f}s")
                 print(f"Predicted actions shape: {actions.shape}")
+                
+                # 每100步打印推理统计
+                if step_count % 100 == 0 and step_count > 0:
+                    success_rate = inference_stats['successful_inferences'] / inference_stats['total_inferences'] * 100
+                    avg_inference_time = inference_stats['total_inference_time'] / inference_stats['successful_inferences'] if inference_stats['successful_inferences'] > 0 else 0
+                    
+                    if use_dual_model:
+                        avg_encoder_time = inference_stats['encoder_inference_time'] / inference_stats['successful_inferences'] if inference_stats['successful_inferences'] > 0 else 0
+                        avg_decoder_time = inference_stats['decoder_inference_time'] / inference_stats['successful_inferences'] if inference_stats['successful_inferences'] > 0 else 0
+                        print(f"ONNX Dual Model Stats - Total: {inference_stats['total_inferences']}, "
+                              f"Success: {inference_stats['successful_inferences']}, "
+                              f"Failed: {inference_stats['failed_inferences']}, "
+                              f"Success Rate: {success_rate:.1f}%, "
+                              f"Avg Total Time: {avg_inference_time:.4f}s, "
+                              f"Avg Encoder: {avg_encoder_time:.4f}s, "
+                              f"Avg Decoder: {avg_decoder_time:.4f}s")
+                    else:
+                        print(f"ONNX Single Model Stats - Total: {inference_stats['total_inferences']}, "
+                              f"Success: {inference_stats['successful_inferences']}, "
+                              f"Failed: {inference_stats['failed_inferences']}, "
+                              f"Success Rate: {success_rate:.1f}%, "
+                              f"Avg Time: {avg_inference_time:.4f}s")
                 
                 print("First action command:")
                 #print(actions[0])
@@ -619,6 +828,28 @@ def main():
                 step_count += 1
         
         print("Inference loop completed.")
+        
+        # 打印最终推理统计
+        if inference_stats['total_inferences'] > 0:
+            success_rate = inference_stats['successful_inferences'] / inference_stats['total_inferences'] * 100
+            avg_inference_time = inference_stats['total_inference_time'] / inference_stats['successful_inferences'] if inference_stats['successful_inferences'] > 0 else 0
+            
+            print(f"\n=== Final ONNX Inference Statistics ===")
+            print(f"Model type: {'Dual Model (Encoder + Decoder)' if use_dual_model else 'Single Model'}")
+            print(f"Total inferences: {inference_stats['total_inferences']}")
+            print(f"Successful: {inference_stats['successful_inferences']}")
+            print(f"Failed: {inference_stats['failed_inferences']}")
+            print(f"Success rate: {success_rate:.1f}%")
+            print(f"Average total inference time: {avg_inference_time:.4f}s")
+            print(f"Total inference time: {inference_stats['total_inference_time']:.2f}s")
+            
+            if use_dual_model:
+                avg_encoder_time = inference_stats['encoder_inference_time'] / inference_stats['successful_inferences'] if inference_stats['successful_inferences'] > 0 else 0
+                avg_decoder_time = inference_stats['decoder_inference_time'] / inference_stats['successful_inferences'] if inference_stats['successful_inferences'] > 0 else 0
+                print(f"Average encoder time: {avg_encoder_time:.4f}s")
+                print(f"Average decoder time: {avg_decoder_time:.4f}s")
+                print(f"Total encoder time: {inference_stats['encoder_inference_time']:.2f}s")
+                print(f"Total decoder time: {inference_stats['decoder_inference_time']:.2f}s")
         
     except Exception as e:
         print(f"Error occurred: {e}")

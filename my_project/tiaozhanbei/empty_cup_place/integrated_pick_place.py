@@ -272,8 +272,8 @@ def main():
     主函数：完整的抓取规划和Pick-and-Place任务流程
     """
     #初始化
-    left_arm_con = PiperArmController(can_name='can0', has_gripper=True)
-    right_arm_con = PiperArmController(can_name='can1', has_gripper=True)
+    left_arm_con = PiperArmController(can_name='0', has_gripper=True)
+    right_arm_con = PiperArmController(can_name='1', has_gripper=True)
     # 文件路径配置
     obj_path = r"F:\wrs_tiaozhanbei\0000_examples\objects\tiaozhanbei\cup.stl"
     grasp_save_path = r"F:\wrs_tiaozhanbei\my_project\tiaozhanbei\empty_cup_place\piper_gripper_grasps.pickle"

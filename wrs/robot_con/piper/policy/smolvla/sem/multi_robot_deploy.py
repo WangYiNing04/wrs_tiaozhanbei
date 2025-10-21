@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import cv2
 
-from robo_orchard_lab.utils.build import build
+# from robo_orchard_lab.utils.build import build  # 不再需要，直接使用配置文件中的函数
 
 # 导入真实机器人接口
 try:
@@ -44,12 +44,20 @@ try:
     realsense = "d400s"
 except Exception:
     try:
-        from wrs.drivers.devices.realsense.realsense_d400 import *
+        from wrs.drivers.devices.realsense.realsense_d400s import *
         realsense = "d400"
     except Exception:
         print("Warning: RealSense drivers not available. Please install wrs package.")
         realsense = None
 
+
+def load_camera_extrinsics(config_path: str):
+    with open(config_path, 'r') as f:
+        data = yaml.safe_load(f)
+    extrinsics = {}
+    for name, params in data.items():
+        extrinsics[name] = np.array(params['extrinsic'], dtype=np.float32)
+    return extrinsics
 
 class MultiRobotSEMPolicy:
     """
@@ -66,15 +74,13 @@ class MultiRobotSEMPolicy:
             ckpt_path: 模型检查点路径
             config_file: 配置文件路径
         """
+        self.config_file = config_file
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # 加载配置
         self.cfg = self._load_config(config_file)
-        
-        # 构建数据变换
-        _, self.transforms = self._build_transforms()
-        if self.transforms is not None:
-            self.transforms = [build(x) for x in self.transforms]
+        # transforms现在已经是构建好的对象，不需要再次构建
             
         # 构建模型
         self.model = self._build_model()
@@ -89,6 +95,8 @@ class MultiRobotSEMPolicy:
         # 初始化状态
         self.action_history = []
         self.step_count = 0
+
+        self.transforms = None
         
         print(f"Multi-Robot SEM Policy initialized successfully on device: {self.device}")
     
@@ -101,18 +109,36 @@ class MultiRobotSEMPolicy:
         config_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(config_module)
         
-        return config_module.cfg
+        return config_module.config
     
     def _build_transforms(self):
         """构建数据变换"""
-        transforms = None
-        if hasattr(self.cfg, 'transforms'):
-            transforms = self.cfg.transforms
-        return None, transforms
+        # 导入build_transforms函数
+        import importlib.util
+        import os
+        
+        config_path = os.path.join(os.path.dirname(__file__), self.config_file)
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        
+        # 使用配置文件中的build_transforms函数
+        train_transforms, val_transforms = config_module.build_transforms(self.cfg)
+        return val_transforms, val_transforms
     
     def _build_model(self):
         """构建模型"""
-        model = build(self.cfg.model)
+        # 导入build_model函数
+        import importlib.util
+        import os
+        
+        config_path = os.path.join(os.path.dirname(__file__), self.config_file)
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        
+        # 使用配置文件中的build_model函数
+        model = config_module.build_model(self.cfg)
         return model
     
     def _load_checkpoint(self, ckpt_path: str):
@@ -207,64 +233,109 @@ class MultiRobotSEMPolicy:
         
         return obs_data
     
-    def predict_action(self, 
-                      images: List[np.ndarray],
-                      depths: List[np.ndarray],
-                      joint_positions: Dict[str, np.ndarray],
-                      camera_intrinsics: List[np.ndarray],
-                      camera_extrinsics: List[np.ndarray],
-                      instruction: str,
-                      base_to_world_transforms: Dict[str, np.ndarray]) -> np.ndarray:
+    def predict_action(
+        self,
+        images: List[np.ndarray],
+        depths: List[np.ndarray],
+        joint_positions: Dict[str, np.ndarray],
+        camera_intrinsics: List[np.ndarray],
+        camera_extrinsics: List[np.ndarray],
+        projection_mats: List[np.ndarray],
+        instruction: str,
+        base_to_world_transforms: Dict[str, np.ndarray],
+    ) -> np.ndarray:
         """
-        预测动作
+        根据多模态输入预测机器人动作。
+        """
+
+         # 打印图像和深度图的尺寸
+        print("Image shapes:")
+        for i, img in enumerate(images):
+            print(f"  Camera {i+1}: {img.shape if img is not None else 'None'}")
         
-        Args:
-            images: 图像列表
-            depths: 深度图像列表
-            joint_positions: 各机械臂关节位置字典
-            camera_intrinsics: 相机内参列表
-            camera_extrinsics: 相机外参列表
-            instruction: 任务指令
-            base_to_world_transforms: 各机械臂基座到世界坐标系的变换
+        print("Depth map shapes:")
+        for i, depth in enumerate(depths):
+            print(f"  Camera {i+1}: {depth.shape if depth is not None else 'None'}")
             
-        Returns:
-            预测的动作序列
-        """
-        # 编码观测数据
-        obs_data = self.encode_multi_robot_obs(
-            images, depths, joint_positions, camera_intrinsics, 
-            camera_extrinsics, instruction, base_to_world_transforms
-        )
+        self.model.eval()
+
+        num_views = len(images)
+
+        # 获取图像尺寸（假设所有图像尺寸相同）
+        height, width, _ = images[0].shape
+        image_wh = np.array([width, height], dtype=np.float32)  # 注意：顺序为宽度、高度
+        # ============================================================
+        # Step 1. 构造符合 BaseDataPreprocessor 的输入数据字典
+        # ============================================================
+        # data = {
+        #     "imgs": torch.from_numpy(np.stack(images)).float(),       # [N, H, W, 3]
+        #     "depths": torch.from_numpy(np.stack(depths)).float(),     # [N, H, W]
+        #     "joint_positions": {k: torch.from_numpy(v).float() for k, v in joint_positions.items()},
+        #     "camera_intrinsics": torch.from_numpy(np.stack(camera_intrinsics)).float(),
+        #     "camera_extrinsics": torch.from_numpy(np.stack(camera_extrinsics)).float(),
+        #     "instruction": instruction,
+        #     "base_to_world": {k: torch.from_numpy(v).float() for k, v in base_to_world_transforms.items()},
+        # }
+
+        # ============================================================
+        # Step 1. 构造符合 BaseDataPreprocessor 的输入数据字典
+        # ============================================================
+        data = {
+            "imgs": np.stack(images),       # [N, H, W, 3]
+            "depths": np.stack(depths),     # [N, H, W]
+            "joint_positions": joint_positions,
+            "camera_intrinsics": np.stack(camera_intrinsics),
+            "camera_extrinsics": np.stack(camera_extrinsics),
+            "projection_mat": projection_mats, 
+            "text":  [instruction] * num_views,
+            "base_to_world": base_to_world_transforms,
+            "image_wh": image_wh,
+        }
         
-        # 应用数据变换
+        
+        # ============================================================
+        # Step 2. 预处理（BaseDataPreprocessor）
+        # ============================================================
+        if hasattr(self, "data_preprocessor") and self.data_preprocessor is not None:
+            data = self.data_preprocessor(data, device=self.device)
+
+        # ============================================================
+        # Step 3. 额外的 transforms（如归一化、随机增强等）
+        # ============================================================
         if self.transforms is not None:
             for transform in self.transforms:
-                obs_data = transform(obs_data)
-        
-        # 转换为张量
-        obs_tensor = self._obs_to_tensor(obs_data)
-        
-        # 推理
+                data = transform(data)
+
+        # ============================================================
+        # Step 4. 转为模型输入
+        # ============================================================
+        # obs_tensor = self._obs_to_tensor(data)
+        # obs_tensor = obs_tensor.to(self.device)
+        obs_tensor = self._prepare_model_input(data)
+
+        # ============================================================
+        # Step 5. 模型前向推理
+        # ============================================================
         with torch.no_grad():
-            obs_tensor = obs_tensor.to(self.device)
             actions = self.model(obs_tensor)
-            
             if isinstance(actions, dict):
-                actions = actions['actions']
-            
-            # 转换为numpy数组
+                actions = actions.get("actions", actions)
+
             if isinstance(actions, torch.Tensor):
-                actions = actions.cpu().numpy()
-            
-            # 确保输出格式正确
-            if len(actions.shape) == 1:
-                actions = actions.reshape(1, -1)
-        
-        # 更新历史
+                actions = actions.detach().cpu().numpy()
+
+            if actions.ndim == 1:
+                actions = actions[None, :]
+
+        # ============================================================
+        # Step 6. 更新历史记录
+        # ============================================================
         self.action_history.append(actions[0])
         self.step_count += 1
-        
+
         return actions
+
+
     
     def _obs_to_tensor(self, obs_data: Dict[str, Any]) -> torch.Tensor:
         """将观测数据转换为张量"""
@@ -276,6 +347,72 @@ class MultiRobotSEMPolicy:
         """重置策略状态"""
         self.action_history = []
         self.step_count = 0
+
+
+    def _prepare_model_input(self, data: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """准备模型输入张量"""
+        model_input = {}
+        
+        # 转换图像数据
+        model_input["imgs"] = torch.from_numpy(data["imgs"]).float().to(self.device)
+        
+        # 转换深度数据
+        model_input["depths"] = torch.from_numpy(data["depths"]).float().to(self.device)
+        
+        # 转换关节位置
+        joint_positions = []
+        for arm_name, joints in data["joint_positions"].items():
+            joint_positions.append(torch.from_numpy(joints).float())
+        model_input["joint_positions"] = torch.cat(joint_positions).to(self.device)
+        
+        # 转换相机内参
+        model_input["camera_intrinsics"] = torch.from_numpy(data["camera_intrinsics"]).float().to(self.device)
+        
+        # 转换相机外参
+        model_input["camera_extrinsics"] = torch.from_numpy(data["camera_extrinsics"]).float().to(self.device)
+        
+        # 转换投影矩阵
+        # projection_mat = data["projection_mat"]
+        # if projection_mat.shape != (4, 4):
+        #     print(f"Warning: Projection_mat shape {projection_mat.shape} is not 4x4. Using identity matrix.")
+        #     projection_mat = np.eye(4)
+        # model_input["projection_mat"] = torch.from_numpy(data["projection_mat"]).float().to(self.device)
+
+    
+        # 转换投影矩阵
+        projection_mats = []
+        for proj_mat in data["projection_mat"]:
+            if proj_mat.shape == (3, 4):
+                # 投影矩阵已经是正确的3x4格式
+                # 转换为模型期望的形状 (1, 3, 4)
+                proj_mat = proj_mat.reshape(1, 3, 4)
+            elif proj_mat.shape == (4, 4):
+                # 如果是4x4，取前3行
+                proj_mat = proj_mat[:3, :].reshape(1, 3, 4)
+            else:
+                print(f"Warning: Projection matrix shape {proj_mat.shape} is not 3x4 or 4x4. Using identity matrix.")
+                proj_mat = np.eye(3, 4).reshape(1, 3, 4)
+            
+            projection_mats.append(torch.from_numpy(proj_mat).float())
+    
+        # 堆叠投影矩阵
+        model_input["projection_mat"] = torch.cat(projection_mats, dim=0).to(self.device)
+
+        # 转换基座到世界坐标系的变换
+        transforms = []
+        for arm_name, transform in data["base_to_world"].items():
+            transforms.append(torch.from_numpy(transform).float())
+        model_input["base_to_world"] = torch.cat(transforms).to(self.device)
+        
+        # 处理指令文本
+        # 这里需要根据模型的实际输入要求实现文本编码
+        # 暂时使用占位符
+        model_input["text"] = data["text"]
+
+        # 转换图像尺寸
+        model_input["image_wh"] = torch.from_numpy(data["image_wh"]).float().to(self.device)
+        
+        return model_input
 
 
 # 工具函数
@@ -325,9 +462,9 @@ def get_color_image(cam):
     """获取彩色图像"""
     try:
         if realsense == "d400s":
-            return cam.get_color_image()
+            return cam.get_color_img()
         else:
-            return cam.get_color_image()
+            return cam.get_color_img()
     except Exception as e:
         print(f"Error getting color image: {e}")
         return None
@@ -337,9 +474,9 @@ def get_depth_image(cam):
     """获取深度图像"""
     try:
         if realsense == "d400s":
-            return cam.get_depth_image()
+            return cam.get_depth_img()
         else:
-            return cam.get_depth_image()
+            return cam.get_depth_img()
     except Exception as e:
         print(f"Error getting depth image: {e}")
         return None
@@ -349,21 +486,29 @@ def get_camera_intrinsics(cam):
     """获取相机内参"""
     try:
         if realsense == "d400s":
-            return cam.get_intrinsics()
+            return cam.intr_mat
+            #return cam.get_intrinsics()
         else:
-            return cam.get_intrinsics()
+            return cam.intr_mat
+            #return cam.get_intrinsics()
     except Exception as e:
         print(f"Error getting camera intrinsics: {e}")
         return np.eye(3, dtype=np.float32)
 
-
+# head_camera:
+#   ID: '243322073422'
+# left_hand_camera:
+#   ID: '243322074546'
+# right_hand_camera:
+#   ID: '243322071033'
 def get_camera_extrinsics(cam):
     """获取相机外参"""
-    try:
-        if realsense == "d400s":
-            return cam.get_extrinsics()
-        else:
-            return cam.get_extrinsics()
+    try:     
+        if hasattr(cam, "serial"):
+            camera_serial = str(cam.serial)
+        camera_extrinsics = load_camera_extrinsics('/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/robot_con/piper/config/camera_extrinsics.yaml')
+        extrinsic = camera_extrinsics.get(camera_serial, np.eye(4, dtype=np.float32))
+        return extrinsic
     except Exception as e:
         print(f"Error getting camera extrinsics: {e}")
         return np.eye(4, dtype=np.float32)
@@ -376,31 +521,42 @@ class MultiRobotInterface:
     支持多个机械臂和多个相机的真实机器人接口
     """
     
-    def __init__(self, robot_config: Dict[str, Any], camera_config_path: Optional[str] = None):
+    def __init__(self, robot_config: Dict[str, Any], camera_config_path: Optional[str] = None, home_state_path: Optional[str] = None):
         """
         初始化多机器人接口
         
         Args:
             robot_config: 机械臂配置字典
             camera_config_path: 相机配置文件路径
+            home_state_path: 零位状态配置文件路径
         """
         self.is_connected = False
         self.arms = {}  # 存储多个机械臂
         self.cameras = {}
         self.camera_config = None
         self.robot_config = robot_config
+        self.home_state = None
+        self.home_state_path = home_state_path
+  
         
         # 加载相机配置
         if camera_config_path and os.path.exists(camera_config_path):
             with open(camera_config_path, 'r') as file:
                 self.camera_config = yaml.safe_load(file)
         
+        # head_camera:
+        #   ID: '243322073422'
+        # left_hand_camera:
+        #   ID: '243322074546'
+        # right_hand_camera:
+        #   ID: '243322071033'
+
         # 默认相机配置
         if self.camera_config is None:
             self.camera_config = {
-                'head_camera': {'ID': 'head_cam'},
-                'left_hand_camera': {'ID': 'left_hand_cam'},
-                'right_hand_camera': {'ID': 'right_hand_cam'}
+                'head_camera': {'ID': '243322073422'},
+                'left_hand_camera': {'ID': '243322074546'},
+                'right_hand_camera': {'ID': '243322071033'}
             }
         
         # 相机角色映射
@@ -409,6 +565,29 @@ class MultiRobotInterface:
             'left_hand': self.camera_config['left_hand_camera']['ID'],
             'right_hand': self.camera_config['right_hand_camera']['ID']
         }
+        
+        # 加载零位状态配置
+        if self.home_state_path and os.path.exists(self.home_state_path):
+            with open(self.home_state_path, 'r') as file:
+                self.home_state = yaml.safe_load(file)
+                print(f"Loaded home state from {self.home_state_path}")
+        else:
+            print("Warning: Home state file not found. Using default home positions.")
+            # 默认零位状态
+            self.home_state = {
+                'left_arm': {
+                    'gripper_effort': 0,
+                    'gripper_opening': 0.2,
+                    'joint_positions': [-0.04260348704118158, 0.12138764947620562, -0.005899212871740834, 
+                                       0.11210249785559578, -0.04365068459237818, -0.20212658067346329]
+                },
+                'right_arm': {
+                    'gripper_effort': 0,
+                    'gripper_opening': 0.0,
+                    'joint_positions': [-0.06995279641993273, 0.08845328649107262, -0.002530727415391778,
+                                       0.0, -0.01996656664281513, 0.015742869852988853]
+                }
+            }
         
     def connect(self) -> bool:
         """
@@ -511,7 +690,7 @@ class MultiRobotInterface:
         
         for arm_name, arm in self.arms.items():
             try:
-                joints = arm.get_joint_positions()
+                joints = arm.get_joint_values()
                 if joints is not None:
                     joint_positions[arm_name] = np.array(joints)
                 else:
@@ -523,6 +702,13 @@ class MultiRobotInterface:
         return joint_positions
     
     def get_camera_data(self, camera_names: List[str]) -> Dict[str, Dict[str, np.ndarray]]:
+        def resize_image(image, target_size=(320, 256)):
+            """调整图像尺寸到目标大小"""
+            return cv2.resize(image, target_size)
+
+        def resize_depth(depth, target_size=(320, 256)):
+            """调整深度图尺寸到目标大小"""
+            return cv2.resize(depth, target_size)
         """
         获取相机数据
         
@@ -533,29 +719,89 @@ class MultiRobotInterface:
             相机数据字典
         """
         camera_data = {}
-        
+        target_size = (320, 256)
+
         for cam_name in camera_names:
             try:
                 if cam_name in self.cameras:
                     cam = self.cameras[cam_name]
                     
-                    # 获取RGB图像
+                    # 获取原始图像
                     rgb_img = get_color_image(cam)
-                    if rgb_img is not None and rgb_img.dtype == np.float32:
-                        rgb_img = (rgb_img * 255).astype(np.uint8)
-                    
-                    # 获取深度图像
                     depth_img = get_depth_image(cam)
+
+                    # 调整图像尺寸
+                    if rgb_img is not None:
+                        rgb_img = resize_image(rgb_img, target_size)
+                    else:
+                        rgb_img = np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
+
+
+                    # 调整深度图尺寸
+                    if depth_img is not None:
+                        depth_img = resize_depth(depth_img, target_size)
+                    else:
+                        depth_img = np.zeros(target_size, dtype=np.float32)
+
+                    # # 获取RGB图像
+                    # rgb_img = get_color_image(cam)
+                    # if rgb_img is not None and rgb_img.dtype == np.float32:
+                    #     rgb_img = (rgb_img * 255).astype(np.uint8)
+                    
+                    # # 获取深度图像
+                    # depth_img = get_depth_image(cam)
                     
                     # 获取相机参数
                     intrinsic = get_camera_intrinsics(cam)
                     extrinsic = get_camera_extrinsics(cam)
+
+
+                    print(f"{cam_name} intrinsic shape: {intrinsic.shape}")
+                    print(f"{cam_name} extrinsic shape: {extrinsic.shape}")
+
+                    # 确保内参矩阵是3×3或4×4
+                    if intrinsic.shape == (3, 3):
+                        # 将3×3内参矩阵扩展为4×4
+                        new_intrinsic = np.eye(4)
+                        new_intrinsic[:3, :3] = intrinsic
+                        intrinsic = new_intrinsic
+                        print(f"Expanded intrinsic to 4x4 for {cam_name}")
+                    elif intrinsic.shape != (4, 4):
+                        print(f"Warning: Unexpected intrinsic shape {intrinsic.shape} for {cam_name}. Using identity matrix.")
+                        intrinsic = np.eye(4)
+                    
+                    # 确保外参矩阵是4×4
+                    if extrinsic.shape != (4, 4):
+                        print(f"Warning: Extrinsic shape {extrinsic.shape} for {cam_name} is not 4x4. Using identity matrix.")
+                        extrinsic = np.eye(4)
+
+
+                    # 构建投影矩阵: P = K @ T_world2cam @ T_base2world
+                    # 其中:
+                    # - K: 相机内参矩阵 [3x3]
+                    # - T_world2cam: 世界坐标系到相机坐标系的变换 [3x4] (取extrinsic前3行)
+                    # - T_base2world: 基座坐标系到世界坐标系的变换 [4x4]
+                    
+                    # 获取相机内参 [3x3]
+                    K = intrinsic[:3, :3] if intrinsic.shape == (4, 4) else intrinsic
+                    
+                    # 获取世界到相机的变换 [3x4]
+                    T_world2cam = extrinsic[:3, :]  # 取前3行
+                    
+                    # 获取基座到世界的变换 [4x4] (这里需要根据相机对应的机械臂来获取)
+                    # 暂时使用单位矩阵，实际应该根据相机对应的机械臂来获取
+                    T_base2world = np.eye(4)
+                    
+                    # 投影矩阵计算: P = K @ T_world2cam @ T_base2world
+                    projection_mat = K @ T_world2cam @ T_base2world  # [3x4]
+                    print(f"{cam_name} projection_mat shape: {projection_mat.shape}")
                     
                     camera_data[cam_name] = {
                         'rgb': rgb_img if rgb_img is not None else np.zeros((480, 640, 3), dtype=np.uint8),
                         'depth': depth_img if depth_img is not None else np.zeros((480, 640), dtype=np.float32),
                         'intrinsic': intrinsic,
-                        'extrinsic': extrinsic
+                        'extrinsic': extrinsic,
+                        'projection_mat': projection_mat  # 添加投影矩阵
                     }
                 else:
                     print(f"Warning: Camera {cam_name} not available")
@@ -563,7 +809,8 @@ class MultiRobotInterface:
                         'rgb': np.zeros((480, 640, 3), dtype=np.uint8),
                         'depth': np.zeros((480, 640), dtype=np.float32),
                         'intrinsic': np.eye(3, dtype=np.float32),
-                        'extrinsic': np.eye(4, dtype=np.float32)
+                        'extrinsic': np.eye(4, dtype=np.float32),
+                        'projection_mat': np.eye(4, dtype=np.float32)
                     }
                     
             except Exception as e:
@@ -572,7 +819,8 @@ class MultiRobotInterface:
                     'rgb': np.zeros((480, 640, 3), dtype=np.uint8),
                     'depth': np.zeros((480, 640), dtype=np.float32),
                     'intrinsic': np.eye(3, dtype=np.float32),
-                    'extrinsic': np.eye(4, dtype=np.float32)
+                    'extrinsic': np.eye(4, dtype=np.float32),
+                    'projection_mat': np.eye(4, dtype=np.float32)
                 }
         
         return camera_data
@@ -605,7 +853,7 @@ class MultiRobotInterface:
                         rotation_robot = self._world_to_robot_coords(rotation, arm_name)
                         
                         # 执行动作
-                        arm.move_to_position(position_robot, rotation_robot)
+                        #arm.move_to_position(position_robot, rotation_robot)
                     else:
                         print(f"Warning: Invalid action format for {arm_name}")
                         success = False
@@ -654,6 +902,103 @@ class MultiRobotInterface:
             ], dtype=np.float32)
         
         return transforms
+    
+    def move_to_home_position(self) -> bool:
+        """
+        移动所有机械臂到零位
+        
+        Returns:
+            是否成功移动到零位
+        """
+        if not self.is_connected:
+            print("Error: Robot not connected. Cannot move to home position.")
+            return False
+        
+        success = True
+        print("Moving all arms to home position...")
+        
+        for arm_name, arm in self.arms.items():
+            try:
+                if arm_name in self.home_state:
+                    home_config = self.home_state[arm_name]
+                    joint_positions = home_config['joint_positions']
+                    gripper_opening = home_config['gripper_opening']
+                    
+                    print(f"Moving {arm_name} to home position...")
+                    print(f"Target joint positions: {joint_positions}")
+                    
+                    # 移动到零位关节位置
+                    arm.move_j(joint_positions)
+                    
+                    # 设置夹爪状态
+                    if hasattr(arm, 'set_gripper_opening'):
+                        arm.set_gripper_opening(gripper_opening)
+                    elif hasattr(arm, 'set_gripper_position'):
+                        arm.set_gripper_position(gripper_opening)
+                    
+                    print(f"{arm_name} moved to home position successfully.")
+                    
+                else:
+                    print(f"Warning: No home position configured for {arm_name}")
+                    success = False
+                    
+            except Exception as e:
+                print(f"Error moving {arm_name} to home position: {e}")
+                success = False
+        
+        if success:
+            print("All arms moved to home position successfully.")
+        else:
+            print("Some arms failed to move to home position.")
+        
+        return success
+    
+    def wait_for_home_position(self, timeout: float = 30.0) -> bool:
+        """
+        等待所有机械臂到达零位
+        
+        Args:
+            timeout: 超时时间（秒）
+            
+        Returns:
+            是否成功到达零位
+        """
+        if not self.is_connected:
+            return False
+        
+        print("Waiting for all arms to reach home position...")
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            all_at_home = True
+            
+            for arm_name, arm in self.arms.items():
+                try:
+                    if arm_name in self.home_state:
+                        current_joints = arm.get_joint_positions()
+                        target_joints = self.home_state[arm_name]['joint_positions']
+                        
+                        # 检查是否到达目标位置（允许小的误差）
+                        joint_error = np.abs(np.array(current_joints) - np.array(target_joints))
+                        max_error = np.max(joint_error)
+                        
+                        if max_error > 0.01:  # 1cm的误差阈值
+                            all_at_home = False
+                            break
+                            
+                except Exception as e:
+                    print(f"Error checking {arm_name} position: {e}")
+                    all_at_home = False
+                    break
+            
+            if all_at_home:
+                print("All arms reached home position.")
+                return True
+            
+            time.sleep(0.1)  # 等待100ms后再次检查
+        
+        print(f"Timeout waiting for home position after {timeout}s")
+        return False
 
 
 def main():
@@ -661,10 +1006,11 @@ def main():
     主函数 - 演示如何使用多机械臂SEM策略
     """
     # 配置参数
-    ckpt_path = "path/to/your/model.safetensors"  # 替换为实际的模型路径
-    config_file = "config_sem_robotwin.py"  # 替换为实际的配置文件路径
-    instruction = "place the empty cup on the table"  # 任务指令
+    ckpt_path = "/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/robot_con/piper/policy/sem/model/stack_blocks_three/model.safetensors"  # 替换为实际的模型路径
+    config_file = "/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/robot_con/piper/policy/sem/config_sem_robotwin.py"  # SEM配置文件路径
+    instruction = "Place red block, green block, and blue block in the center, then arrange green block on red block and blue block on green block"  # 任务指令
     camera_config_path = "/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/robot_con/piper/collect_data/config/camera_correspondence.yaml"  # 相机配置文件路径
+    home_state_path = "/home/wyn/PycharmProjects/wrs_tiaozhanbei/wrs/robot_con/piper/collect_data/config/home_state1.yaml"  # 零位状态配置文件路径
     
     # 多机械臂配置
     robot_config = {
@@ -693,12 +1039,25 @@ def main():
     
     try:
         # 初始化多机器人接口
-        robot_interface = MultiRobotInterface(robot_config, camera_config_path)
+        robot_interface = MultiRobotInterface(robot_config, camera_config_path, home_state_path)
         
         # 连接机器人
         if not robot_interface.connect():
             print("Failed to connect to robots.")
             return
+        
+        # # 移动到零位
+        # print("Moving robots to home position before inference...")
+        # if not robot_interface.move_to_home_position():
+        #     print("Failed to move to home position.")
+        #     return
+        
+        # # 等待到达零位
+        # if not robot_interface.wait_for_home_position(timeout=30.0):
+        #     print("Timeout waiting for home position.")
+        #     return
+        
+        print("All robots are now at home position. Ready for inference.")
         
         # 初始化多机械臂SEM策略
         print("Initializing Multi-Robot SEM policy...")
@@ -728,6 +1087,7 @@ def main():
                 depths = [camera_data[cam_name]['depth'] for cam_name in camera_names]
                 camera_intrinsics = [camera_data[cam_name]['intrinsic'] for cam_name in camera_names]
                 camera_extrinsics = [camera_data[cam_name]['extrinsic'] for cam_name in camera_names]
+                projection_mats = [camera_data[cam_name]['projection_mat'] for cam_name in camera_names]
                 
                 # 预测动作
                 start_time = time.time()
@@ -737,6 +1097,7 @@ def main():
                     joint_positions=joint_positions,
                     camera_intrinsics=camera_intrinsics,
                     camera_extrinsics=camera_extrinsics,
+                    projection_mats=projection_mats,
                     instruction=instruction,
                     base_to_world_transforms=base_to_world_transforms
                 )

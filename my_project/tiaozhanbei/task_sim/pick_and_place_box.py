@@ -6,6 +6,7 @@ from wrs import wd, rm, mgm, mcm, ppp, rrtc, gg
 import wrs.robot_sim.robots.piper.piper_single_arm as psa
 import numpy as np
 import wrs.robot_sim.end_effectors.grippers.piper_gripper.piper_gripper as pg
+from direct.task.TaskManagerGlobal import taskMgr
 
 base = wd.World(cam_pos=[1.2, .7, 1], lookat_pos=[.0, 0, .15])
 mgm.gen_frame().attach_to(base)
@@ -18,8 +19,9 @@ ground.show_cdprim()
 ## object holder (起始位置)
 holder_1 = mcm.CollisionModel(r"F:\wrs_tiaozhanbei\0000_examples\objects\tiaozhanbei\cup.stl")
 holder_1.rgba = rm.np.array([.5, .5, .5, 1])
-h1_gl_pos = np.array([0.3397, -0.2887, 0.0701])
-h1_gl_rotmat = rm.rotmat_from_euler(2.8813, 0.2080, 2.4237)
+h1_gl_pos = np.array([0.3397, -0.2887, 0])
+#h1_gl_rotmat = rm.rotmat_from_euler(2.8813, 0.2080, 2.4237)
+h1_gl_rotmat = rm.rotmat_from_euler(0, 0, 0)
 holder_1.pos = h1_gl_pos
 holder_1.rotmat = h1_gl_rotmat
 mgm.gen_frame().attach_to(holder_1)
@@ -29,8 +31,9 @@ h1_copy.attach_to(base)
 h1_copy.show_cdprim()
 
 holder_2 = mcm.CollisionModel(r"F:\wrs_tiaozhanbei\0000_examples\objects\tiaozhanbei\cup.stl")
-h2_gl_pos = np.array([0.378, -0.099417, 0.0701])
-h2_gl_rotmat = rm.rotmat_from_euler(3.0369, -0.0483, 2.7970)
+h2_gl_pos = np.array([0.378, -0.099417, 0])
+#h2_gl_rotmat = rm.rotmat_from_euler(3.0369, -0.0483, 2.7970)
+h2_gl_rotmat = rm.rotmat_from_euler(0, 0, 0)
 holder_2.pos = h2_gl_pos
 holder_2.rotmat = h2_gl_rotmat
 # visualize a copy
@@ -67,8 +70,8 @@ mot_data = ppp.gen_pick_and_place(
     end_jnt_values=start_conf,
     grasp_collection=grasp_collection,
     goal_pose_list=goal_pose_list,
-    pick_approach_distance_list=[.05] * len(goal_pose_list),
-    pick_depart_distance_list=[.05] * len(goal_pose_list),
+    place_approach_distance_list=[.05] * len(goal_pose_list),
+    place_depart_distance_list=[.05] * len(goal_pose_list),
     pick_approach_distance=.05,
     pick_depart_distance=.05,
     pick_depart_direction=rm.const.z_ax,

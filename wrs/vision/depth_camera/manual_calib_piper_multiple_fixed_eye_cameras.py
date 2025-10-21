@@ -606,3 +606,6 @@ if __name__ == "__main__":
     print("标定完成后按Ctrl+C退出，标定结果会自动保存")
 
     base.run()
+
+
+

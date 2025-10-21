@@ -687,9 +687,9 @@ class PiperArmController:
 
 if __name__ == "__main__":
     import time
-    can_name = "can0"  # Change this to your CAN interface name if needed
+    can_name = "can1"  # Change this to your CAN interface name if needed
     if platform.system() == "Windows":
-        can_name = "0"
+        can_name = "1"
     print("Creating PiperArmController...")
     arm = PiperArmController(can_name=can_name, has_gripper=True)
 

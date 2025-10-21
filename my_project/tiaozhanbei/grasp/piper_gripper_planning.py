@@ -8,7 +8,7 @@ import wrs.robot_sim.end_effectors.grippers.piper_gripper.piper_gripper as pg
 base = wd.World(cam_pos=rm.vec(.5, .5, .5), lookat_pos=rm.vec(0, 0, 0))
 mgm.gen_frame().attach_to(base)
 
-obj_cmodel = mcm.CollisionModel(r"D:/Project/wrs-main/0000_examples/objects/cup.stl")
+obj_cmodel = mcm.CollisionModel(r"F:\wrs_tiaozhanbei\0000_examples\objects\tiaozhanbei\cup.stl")
 obj_cmodel.attach_to(base)
 
 # 实例化 PiperGripper
@@ -19,7 +19,7 @@ grasp_collection = gpa.plan_gripper_grasps(gripper,
                                            rotation_interval=rm.radians(15),
                                            max_samples=50,
                                            min_dist_between_sampled_contact_points=.1,
-                                           contact_offset=.01,
+                                           contact_offset=.02,
                                            toggle_dbg=False)
 
 print(grasp_collection)

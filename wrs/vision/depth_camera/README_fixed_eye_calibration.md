@@ -143,3 +143,6 @@ P_world = T_cam2world * P_camera
 - 标定精度评估
 - 多相机标定优化
 - 标定结果可视化
+
+
+
